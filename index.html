@@ -268,6 +268,8 @@
         <input type="text" id="ai-name-input" placeholder="gemini"><br>
         <label>ペルソナ設定 (System Instruction):</label><br>
         <textarea id="persona-setting" rows="6"></textarea>
+        <button onclick="clearHistory()"
+            style="width:100%; padding: 10px; background: #ff4444; color: white; border: none; border-radius: 8px; cursor: pointer; margin-bottom: 10px;">会話履歴を消去</button>
         <button onclick="saveSettings()"
             style="width:100%; padding: 15px; background: #2b5278; color: white; border: none; border-radius: 8px; cursor: pointer;">保存して閉じる</button>
     </div>
@@ -309,6 +311,7 @@
         let selectedFile = null;
         let totalCharCount = 0;
         let chatSession = null; // 会話を記憶するための変数だよ
+        let chatHistory = []; // 会話履歴を保存する配列
 
         // 初期設定の読み込み
         document.getElementById('api-key').value = localStorage.getItem('gemini_api_key') || '';
@@ -319,6 +322,9 @@
         document.getElementById('ai-name-input').value = savedAiName;
         document.getElementById('ai-name-display').innerText = savedAiName;
         document.title = `${savedAiName} Window`;
+
+        // 会話履歴の読み込み
+        loadHistory();
 
         // 入力欄の高さ自動調整
         const textarea = document.getElementById('user-input');
@@ -343,7 +349,19 @@
             document.title = `${newAiName} Window`;
 
             chatSession = null; // 設定を変えたら、記憶を一度リセットするね
+            // 設定変更後も履歴は維持したいので、chatSessionの再初期化はsendMessage内で行う
             toggleSettings();
+        };
+
+        window.clearHistory = () => {
+            if (confirm('会話履歴をすべて消去しますか？')) {
+                localStorage.removeItem('gemini_chat_history');
+                chatHistory = [];
+                document.getElementById('chat-container').innerHTML = '';
+                chatSession = null;
+                alert('履歴を消去しました');
+                toggleSettings();
+            }
         };
 
         window.handleFileSelect = () => {
@@ -399,11 +417,12 @@
                 // まだ会話が始まっていなければ、新しくスレッドを作るよ
                 if (!chatSession) {
                     chatSession = model.startChat({
-                        history: []
+                        history: chatHistory
                     });
                 }
 
                 let parts = [];
+                let historyPart = []; // 履歴保存用
 
                 // ファイルがある場合の処理
                 if (selectedFile) {
@@ -422,6 +441,10 @@
                 // メッセージを追加
                 if (userText) {
                     parts.push(userText);
+                    historyPart.push(userText); // 履歴用（テキストのみ簡易保存）
+                } else if (selectedFile) {
+                    // ファイルのみの場合の履歴用テキスト（簡易）
+                    historyPart.push(`(ファイル添付: ${selectedFile.name})`);
                 }
 
                 // generateContent の代わりに、chatSession.sendMessage を使うよ
@@ -439,6 +462,26 @@
                 const aiTextWithDate = `${dateStr}\n\n${aiText}`;
                 addMessage(aiTextWithDate, 'ai');
 
+                // 履歴配列を更新 (Geminiのhistory形式に合わせる)
+                // ユーザー送信分
+                // 画像データなどはlocalStorageに入らないので、簡易的にテキストのみ保存
+                // 本来は画像もBase64で保存できるが容量制限があるため、ここではテキスト履歴の維持を優先
+
+                // ユーザーのメッセージ（表示用テキストベース）
+                let userHistoryText = userText;
+                if (selectedFile) userHistoryText = `[📎 ${selectedFile.name}]\n` + userHistoryText;
+
+                chatHistory.push({
+                    role: 'user',
+                    parts: [{ text: userHistoryText }]
+                });
+
+                // AIの返信
+                chatHistory.push({
+                    role: 'model',
+                    parts: [{ text: aiTextWithDate }]
+                });
+
                 // AIの返信文字数を加算
                 totalCharCount += aiText.length;
                 updateCharCount();
@@ -446,11 +489,16 @@
                 // ファイルの添付状態をクリア
                 clearFile();
 
+                // 履歴を保存
+                saveHistory();
+
             } catch (error) {
                 removeLoading(loadingId);
                 addMessage('エラーみたいだね：' + error.message, 'ai');
             }
         };
+
+
 
         function addMessage(text, sender) {
             const div = document.createElement('div');
@@ -458,6 +506,41 @@
             div.innerText = text;
             chatContainer.appendChild(div);
             chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            // 履歴配列に追加（ロード時は重複しないように制御が必要だが、今回は簡易的に常に追加）
+            // ただし、ロード時にaddMessageを呼ぶと二重になるので、saveHistoryで一括保存する方式にする
+            // ここでは表示用の処理のみ
+        }
+
+        function saveHistory() {
+            // 現在のchatSessionの履歴を取得できればベストだが、
+            // シンプルに表示されている内容を保存するのではなく、
+            // APIとのやりとりの履歴（chatHistory）をlocalStorageに保存する
+
+            // chatSession.getHistory() は非同期で重い可能性があるので、
+            // 簡易的に手動で管理している chatHistory 配列を保存する
+            localStorage.setItem('gemini_chat_history', JSON.stringify(chatHistory));
+        }
+
+        function loadHistory() {
+            const saved = localStorage.getItem('gemini_chat_history');
+            if (saved) {
+                chatHistory = JSON.parse(saved);
+                // 画面に復元
+                for (const msg of chatHistory) {
+                    // msg = { role: 'user' | 'model', parts: [{ text: '...' }] }
+                    const text = msg.parts[0].text;
+                    const sender = msg.role === 'user' ? 'user' : 'ai';
+                    // 日時などのメタデータが含まれている場合はそのまま表示
+
+                    // addMessageを使うと二重に履歴に追加されてしまうので、直接DOM操作するかフラグで制御
+                    const div = document.createElement('div');
+                    div.className = `msg ${sender}`;
+                    div.innerText = text; // ここは既に日時付きのテキストになっているはず
+                    chatContainer.appendChild(div);
+                }
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
         }
 
         function addLoading(id) {
